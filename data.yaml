@@ -1,0 +1,13 @@
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 4
+names: ['asap rokok', 'membakar rokok', 'merokok', 'pegang rokok']
+
+roboflow:
+  workspace: rizqhis-workspace
+  project: deteksi-rokok-i8mcz
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/rizqhis-workspace/deteksi-rokok-i8mcz/dataset/1
