@@ -2,12 +2,12 @@ train: ../train/images
 val: ../valid/images
 test: ../test/images
 
-nc: 4
-names: ['asap rokok', 'membakar rokok', 'merokok', 'pegang rokok']
+nc: 2
+names: ['dataset-deteksi-merokok', 'pegang rokok']
 
 roboflow:
   workspace: rizqhis-workspace
-  project: deteksi-rokok-ws0ft
+  project: dataset-deteksi-merokok
   version: 1
   license: CC BY 4.0
-  url: https://universe.roboflow.com/rizqhis-workspace/deteksi-rokok-ws0ft/dataset/1
+  url: https://universe.roboflow.com/rizqhis-workspace/dataset-deteksi-merokok/dataset/1

@@ -1,7 +1,7 @@
 # Deteksi Aktivitas Merokok — YOLOv12
 
-Project deteksi aktivitas merokok dengan 4 kelas:
-`asap_rokok`, `membakar_rokok`, `pegang_rokok`, `merokok`.
+Project deteksi aktivitas merokok dengan 2 kelas:
+`merokok`, `pegang_rokok`.
 
 ## Struktur
 

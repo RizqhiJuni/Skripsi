@@ -77,8 +77,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Deteksi Aktivitas Merokok - YOLOv12",
-    description="API deteksi 4-class: asap_rokok, membakar_rokok, "
-                "pegang_rokok, merokok",
+    description="API deteksi 2-class: merokok, pegang_rokok",
     version="1.0.0",
     lifespan=lifespan,
 )

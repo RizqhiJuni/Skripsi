@@ -36,18 +36,14 @@ logger = setup_logger()
 # Konstanta
 # ---------------------------------------------------------------------------
 CLASS_NAMES: Dict[int, str] = {
-    0: "asap rokok",
-    1: "membakar rokok",
-    2: "merokok",
-    3: "pegang rokok",
+    0: "merokok",
+    1: "pegang rokok",
 }
 
 # Warna BGR per kelas (untuk drawing)
 CLASS_COLORS: Dict[int, tuple] = {
-    0: (200, 200, 200),  # asap rokok - abu-abu
-    1: (0, 0, 255),      # membakar rokok - merah
-    2: (0, 255, 255),    # merokok - kuning
-    3: (0, 165, 255),    # pegang rokok - oranye
+    0: (0, 255, 255),    # merokok - kuning
+    1: (0, 165, 255),    # pegang rokok - oranye
 }
 
 
