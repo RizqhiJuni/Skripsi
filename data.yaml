@@ -3,11 +3,11 @@ val: ../valid/images
 test: ../test/images
 
 nc: 2
-names: ['dataset-deteksi-merokok', 'pegang rokok']
+names: ['terdeteksi merokok', 'terdeteksi pegang rokok']
 
 roboflow:
   workspace: rizqhis-workspace
-  project: dataset-deteksi-merokok
+  project: dataset-deteksi-merokok-5fqjk
   version: 1
   license: CC BY 4.0
-  url: https://universe.roboflow.com/rizqhis-workspace/dataset-deteksi-merokok/dataset/1
+  url: https://universe.roboflow.com/rizqhis-workspace/dataset-deteksi-merokok-5fqjk/dataset/1
