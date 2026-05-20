@@ -1,0 +1,16 @@
+{
+  "name": "wa-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mini WhatsApp bridge (whatsapp-web.js) - WAHA-compatible endpoints",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "qrcode-terminal": "^0.12.0",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.25.0"
+  }
+}
