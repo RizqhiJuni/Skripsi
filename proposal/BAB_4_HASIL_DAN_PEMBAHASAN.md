@@ -92,7 +92,7 @@ Berdasarkan analisis terhadap penamaan file dalam dataset, teridentifikasi bahwa
 
 Distribusi kelas dan karakteristik *bounding box* pada data pelatihan divisualisasikan pada **Gambar 4.1**. Visualisasi ini menunjukkan empat aspek penting dari dataset: (1) distribusi jumlah instansi per kelas, (2) distribusi spasial pusat *bounding box* pada citra, (3) sebaran posisi pusat objek pada sumbu x dan y, serta (4) distribusi rasio lebar dan tinggi *bounding box*.
 
-![Gambar 4.1 Distribusi Dataset dan Karakteristik Bounding Box](runs/detect/runs/train/rokok_yolov12/labels.jpg)
+![Gambar 4.1 Distribusi Dataset dan Karakteristik Bounding Box](../runs/detect/runs/train/rokok_yolov12/labels.jpg)
 
 **Gambar 4.1** Distribusi Dataset dan Karakteristik *Bounding Box*
 
@@ -149,7 +149,7 @@ Tiga komponen *loss function* yang dioptimasi selama pelatihan meliputi:
 
 Evolusi ketiga komponen *loss* selama proses pelatihan divisualisasikan pada **Gambar 4.2**.
 
-![Gambar 4.2 Grafik Training Loss dan Metrik Evaluasi](runs/detect/runs/train/rokok_yolov12/results.png)
+![Gambar 4.2 Grafik Training Loss dan Metrik Evaluasi](../runs/detect/runs/train/rokok_yolov12/results.png)
 
 **Gambar 4.2** Grafik *Training Loss* dan Metrik Evaluasi Selama Proses Pelatihan
 
@@ -218,7 +218,7 @@ Berdasarkan Tabel 4.7, dapat diinterpretasikan sebagai berikut:
 
 Kurva *Precision-Recall* menunjukkan hubungan antara *Precision* dan *Recall* pada berbagai nilai *confidence threshold*. Area di bawah kurva (*Area Under Curve* / AUC) merepresentasikan nilai *Average Precision* (AP) untuk masing-masing kelas.
 
-![Gambar 4.3 Kurva Precision-Recall](runs/detect/runs/train/rokok_yolov12/BoxPR_curve.png)
+![Gambar 4.3 Kurva Precision-Recall](../runs/detect/runs/train/rokok_yolov12/BoxPR_curve.png)
 
 **Gambar 4.3** Kurva *Precision-Recall*
 
@@ -228,7 +228,7 @@ Berdasarkan Gambar 4.3, kelas *terdeteksi merokok* (garis biru muda) memiliki AP
 
 Kurva F1-*Confidence* menunjukkan nilai F1-Score pada berbagai level *confidence threshold*, yang berguna untuk menentukan *threshold* optimal pada saat *deployment*.
 
-![Gambar 4.4 Kurva F1-Confidence](runs/detect/runs/train/rokok_yolov12/BoxF1_curve.png)
+![Gambar 4.4 Kurva F1-Confidence](../runs/detect/runs/train/rokok_yolov12/BoxF1_curve.png)
 
 **Gambar 4.4** Kurva F1-*Confidence*
 
@@ -238,11 +238,11 @@ Berdasarkan Gambar 4.4, nilai F1-Score optimal untuk seluruh kelas dicapai pada 
 
 *Confusion Matrix* digunakan untuk mengevaluasi distribusi prediksi model terhadap *ground truth* pada data validasi. Matriks ini menunjukkan jumlah prediksi benar dan salah untuk setiap kombinasi kelas aktual dan kelas prediksi.
 
-![Gambar 4.5 Confusion Matrix](runs/detect/runs/train/rokok_yolov12/confusion_matrix.png)
+![Gambar 4.5 Confusion Matrix](../runs/detect/runs/train/rokok_yolov12/confusion_matrix.png)
 
 **Gambar 4.5** *Confusion Matrix*
 
-![Gambar 4.6 Confusion Matrix Normalized](runs/detect/runs/train/rokok_yolov12/confusion_matrix_normalized.png)
+![Gambar 4.6 Confusion Matrix Normalized](../runs/detect/runs/train/rokok_yolov12/confusion_matrix_normalized.png)
 
 **Gambar 4.6** *Confusion Matrix* Ternormalisasi
 
