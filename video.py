@@ -313,18 +313,21 @@ def main() -> None:
                 continue
             no_frame_t = time.time()
 
-            # ----- Trigger alarm WA (async, non-blocking) -----
+            # ----- Trigger alarm WA (event-based, async non-blocking) -----
+            # process_frame() menggabungkan deteksi berturut-turut menjadi
+            # satu "event merokok": 1 pesan saat event mulai + 1 pesan
+            # ringkasan saat event selesai. Ini menggantikan kombinasi
+            # lama (should_trigger + enqueue) yang spam tiap cooldown.
             if alarm is not None and alarm.enabled:
-                level, trigger_det = alarm.should_trigger(detections)
-                if level is not None and trigger_det is not None:
-                    extra = f"Lokasi : {camera_location}" if camera_location else ""
-                    alarm.enqueue(trigger_det, frame=vis,
-                                  extra_text=extra, level=level)
-                elif detections:
+                extra = f"Lokasi : {camera_location}" if camera_location else ""
+                alarm.process_frame(
+                    detections, frame=vis, extra_text=extra,
+                )
+                if detections and logger.isEnabledFor(10):  # DEBUG=10
                     top = max(detections, key=lambda d: d.get("confidence", 0.0))
                     logger.debug(
                         f"det top: {top.get('class_name')} "
-                        f"{top.get('confidence', 0):.2%} (belum trigger)"
+                        f"{top.get('confidence', 0):.2%}"
                     )
 
             # FPS display (loop UI) — ukur jarak antar frame yang ditampilkan

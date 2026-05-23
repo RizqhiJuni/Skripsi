@@ -23,9 +23,11 @@ Catatan:
 from __future__ import annotations
 
 import os
+import json
 import queue
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Deque, Iterable, List, Optional, Tuple
@@ -155,7 +157,11 @@ class WhatsAppAlarm:
         self.snapshot_jpeg_quality = int(os.getenv("ALERT_JPEG_QUALITY", "75"))
 
         if alert_classes is None:
-            raw = os.getenv("ALERT_CLASSES", "merokok,pegang rokok")
+            raw = os.getenv(
+                "ALERT_CLASSES",
+                "terdeteksi merokok,terdeteksi pegang rokok,"
+                "merokok,pegang rokok",
+            )
             alert_classes = [c.strip().lower() for c in raw.split(",") if c.strip()]
         else:
             alert_classes = [c.strip().lower() for c in alert_classes]
@@ -166,7 +172,7 @@ class WhatsAppAlarm:
         # (mis. "pegang rokok" -> belum tentu menghisap).
         raw_confirm = os.getenv(
             "ALERT_CONFIRM_CLASSES",
-            "dataset-deteksi-merokok,merokok",
+            "terdeteksi merokok,merokok",
         )
         self.confirm_classes = {
             c.strip().lower() for c in raw_confirm.split(",") if c.strip()
@@ -185,6 +191,48 @@ class WhatsAppAlarm:
         self._worker: Optional[threading.Thread] = None
         self._worker_stop = threading.Event()
         self._cooldown_lock = threading.Lock()
+
+        # ---------------- Event-based debouncing ----------------
+        # Daripada men-trigger setiap kali cooldown habis (spam!),
+        # rangkai deteksi berturut-turut sebagai SATU event:
+        #   - Pesan "start" terkirim saat event dimulai.
+        #   - Pesan "summary" terkirim saat event berakhir (gap >
+        #     EVENT_GAP_SEC tanpa deteksi, atau durasi melewati
+        #     EVENT_MAX_DUR_SEC).
+        # Hasil: 1 sesi merokok = 2 pesan, bukan belasan.
+        self.event_gap_sec = float(os.getenv("ALERT_EVENT_GAP_SEC", "15"))
+        self.event_max_dur_sec = float(
+            os.getenv("ALERT_EVENT_MAX_DUR_SEC", "120")
+        )
+        self.event_inter_cooldown = float(
+            os.getenv("ALERT_EVENT_INTER_COOLDOWN_SEC", "30")
+        )
+        self.event_send_summary = (
+            os.getenv("ALERT_EVENT_SEND_SUMMARY", "true").strip().lower()
+            in ("1", "true", "yes", "y", "on")
+        )
+        # Persistensi event ke JSONL (untuk dashboard / evaluasi skripsi).
+        # Format: 1 baris JSON per event yang SELESAI -- append only.
+        self.event_log_path = Path(
+            os.getenv("EVENT_LOG_PATH", "runs/events.jsonl")
+        )
+        self.event_snapshot_dir = Path(
+            os.getenv("EVENT_SNAPSHOT_DIR", "runs/alarm")
+        )
+        self._jsonl_lock = threading.Lock()
+        self._event_lock = threading.Lock()
+        self._event_active: bool = False
+        self._event_id: str = ""
+        self._event_level: str = "suspect"
+        self._event_start_ts: float = 0.0
+        self._event_last_det_ts: float = 0.0
+        self._event_frame_count: int = 0
+        self._event_peak_det: Optional[dict] = None
+        self._event_peak_frame: Optional[np.ndarray] = None
+        self._event_first_det: Optional[dict] = None
+        self._event_class_counts: dict = {}
+        self._event_end_ts: float = 0.0
+        self._event_camera_location: str = ""
 
         if not self.recipients:
             logger.warning(
@@ -218,26 +266,16 @@ class WhatsAppAlarm:
         while self._history and (now - self._history[0][0]) > self.window_sec:
             self._history.popleft()
 
-    def should_trigger(
-        self, detections: list[dict]
+    def _evaluate_level(
+        self, detections: list[dict], now: float
     ) -> Tuple[Optional[str], Optional[dict]]:
-        """Evaluasi deteksi -> kembalikan (level, detection_terbaik).
+        """Versi internal should_trigger TANPA pengecekan cooldown.
 
-        Strategi:
-            1. Kumpulkan SEMUA bbox per frame yang lolos kelas + suspect_conf
-               (bukan hanya yang tertinggi -> supaya event "merokok" yang
-               singkat tidak tertutup oleh "pegang rokok" yang dominan).
-            2. PRIORITAS: kalau di window ada >= confirm_min_hits bbox dari
-               confirm-class (mis. "merokok") dgn conf >= confirm_conf,
-               langsung trigger CONFIRM. Default confirm_min_hits=1 supaya
-               event hisap-rokok yg cepat tidak terlewat.
-            3. Kalau tidak, fallback ke logika lama: butuh >= min_hits di
-               window, pilih conf tertinggi -> tier suspect.
+        Dipakai oleh event-based debouncer (``process_frame``) yang punya
+        mekanisme anti-spam sendiri (per-event, bukan per-detection).
         """
         if not self.enabled:
             return None, None
-
-        now = time.time()
         # Kumpulkan SEMUA bbox sah di frame ini (bukan hanya max).
         # Ini krusial: kalau frame punya "pegang_rokok 0.85" + "merokok 0.72",
         # keduanya HARUS masuk window -> supaya "merokok" tdk hilang.
@@ -247,6 +285,17 @@ class WhatsAppAlarm:
                 continue
             name = str(det.get("class_name", "")).lower()
             if self.alert_classes and name not in self.alert_classes:
+                # Peringatkan SEKALI per nama kelas asing supaya bug
+                # mismatch ALERT_CLASSES vs data.yaml gampang ketahuan.
+                if not hasattr(self, "_warned_unknown"):
+                    self._warned_unknown = set()
+                if name and name not in self._warned_unknown:
+                    self._warned_unknown.add(name)
+                    logger.warning(
+                        f"Deteksi class '{name}' (conf={conf:.2%}) diabaikan: "
+                        f"tidak ada di ALERT_CLASSES={sorted(self.alert_classes)}. "
+                        "Periksa nama kelas di data.yaml vs .env."
+                    )
                 continue
             self._history.append((now, det))
         self._prune_history(now)
@@ -264,8 +313,6 @@ class WhatsAppAlarm:
             )
         ]
         if len(confirm_hits) >= self.confirm_min_hits:
-            if self._on_cooldown("confirm"):
-                return None, None
             best = max(confirm_hits, key=lambda d: float(d["confidence"]))
             return "confirm", best
 
@@ -275,9 +322,23 @@ class WhatsAppAlarm:
         best_in_window = max(
             self._history, key=lambda x: float(x[1]["confidence"])
         )[1]
-        if self._on_cooldown("suspect"):
-            return None, None
         return "suspect", best_in_window
+
+    def should_trigger(
+        self, detections: list[dict]
+    ) -> Tuple[Optional[str], Optional[dict]]:
+        """Versi lama (per-detection + cooldown). Dipertahankan utk kompat.
+
+        Untuk pemakaian baru, gunakan :meth:`process_frame` yang memakai
+        event-based debouncing (jauh lebih sedikit notifikasi).
+        """
+        now = time.time()
+        level, det = self._evaluate_level(detections, now)
+        if level is None or det is None:
+            return None, None
+        if self._on_cooldown(level):
+            return None, None
+        return level, det
 
     # ---------------------------------------------------------------- WAHA IO
     def check_session(self) -> bool:
@@ -348,6 +409,358 @@ class WhatsAppAlarm:
             return self.send_text(caption) if caption else False
         return self.send_image_bytes(p.read_bytes(), p.name, caption=caption)
 
+    # ============================ EVENT-BASED API ============================
+    # Strategi anti-spam: gabungkan deteksi berturut-turut menjadi satu
+    # "event merokok" -> 1 pesan saat mulai + 1 pesan ringkasan saat
+    # selesai. Drastis mengurangi notifikasi (mis. 1 sesi 5 menit dari
+    # belasan pesan -> 2 pesan).
+
+    def process_frame(
+        self,
+        detections: list[dict],
+        frame: Optional[np.ndarray] = None,
+        extra_text: str = "",
+        snapshot_dir: str | Path = "runs/alarm",
+    ) -> None:
+        """Update mesin state event dan kirim notifikasi bila perlu.
+
+        Panggil method ini SETIAP frame dari pipeline video (gantikan
+        kombinasi ``should_trigger`` + ``enqueue`` yang lama).
+        """
+        if not self.enabled:
+            return
+        now = time.time()
+        level, det = self._evaluate_level(detections, now)
+
+        with self._event_lock:
+            if self._event_active:
+                if det is not None:
+                    self._event_last_det_ts = now
+                    self._event_frame_count += 1
+                    cls = str(det.get("class_name", "?"))
+                    self._event_class_counts[cls] = (
+                        self._event_class_counts.get(cls, 0) + 1
+                    )
+                    cur_conf = float(det.get("confidence", 0.0))
+                    peak_conf = (
+                        float(self._event_peak_det.get("confidence", 0.0))
+                        if self._event_peak_det else 0.0
+                    )
+                    if cur_conf > peak_conf:
+                        self._event_peak_det = det
+                        if frame is not None:
+                            self._event_peak_frame = frame.copy()
+                    if level == "confirm" and self._event_level != "confirm":
+                        self._event_level = "confirm"
+                        logger.info(
+                            "Event di-upgrade: suspect -> confirm "
+                            f"(conf={cur_conf:.2%})"
+                        )
+                # Cek kondisi penutupan event
+                gap = now - self._event_last_det_ts
+                dur = now - self._event_start_ts
+                if gap > self.event_gap_sec or dur > self.event_max_dur_sec:
+                    self._close_event_locked(now, extra_text, snapshot_dir)
+            else:
+                if level is None or det is None:
+                    return
+                # Cooldown antar-event supaya tidak langsung buka event
+                # baru sesaat setelah yg lama tutup.
+                if (now - self._event_end_ts) < self.event_inter_cooldown:
+                    return
+                self._start_event_locked(
+                    now, level, det, frame, extra_text, snapshot_dir
+                )
+
+    def _start_event_locked(
+        self,
+        now: float,
+        level: str,
+        detection: dict,
+        frame: Optional[np.ndarray],
+        extra_text: str,
+        snapshot_dir: str | Path,
+    ) -> None:
+        self._event_active = True
+        self._event_id = uuid.uuid4().hex[:12]
+        self._event_level = level
+        self._event_start_ts = now
+        self._event_last_det_ts = now
+        self._event_frame_count = 1
+        self._event_peak_det = detection
+        self._event_peak_frame = frame.copy() if frame is not None else None
+        self._event_first_det = detection
+        cls = str(detection.get("class_name", "?"))
+        self._event_class_counts = {cls: 1}
+        # Simpan camera_location dari extra_text agar konsisten di summary.
+        self._event_camera_location = self._extract_camera_location(extra_text)
+
+        if level == "suspect" and not self.suspect_enabled:
+            conf = float(detection.get("confidence", 0.0))
+            logger.info(
+                f"Event suspect dimulai tapi tidak dikirim "
+                f"(ALERT_SUSPECT_ENABLED=false, conf={conf:.2%})"
+            )
+            return
+
+        msg = self._build_event_start_message(detection, level, extra_text)
+        self._enqueue_built_message(
+            msg, frame, snapshot_dir,
+            prefix=("suspect" if level == "suspect" else "alarm") + "_start",
+            tag=f"{level}-start",
+        )
+
+    def _close_event_locked(
+        self,
+        now: float,
+        extra_text: str,
+        snapshot_dir: str | Path,
+    ) -> None:
+        # Akhiri pada saat deteksi TERAKHIR (bukan saat kita baru sadar).
+        duration = max(0.0, self._event_last_det_ts - self._event_start_ts)
+        level = self._event_level
+        event_id = self._event_id or uuid.uuid4().hex[:12]
+        peak_det = self._event_peak_det or self._event_first_det or {}
+        frame_to_send = self._event_peak_frame
+        frame_count = self._event_frame_count
+        class_counts = dict(self._event_class_counts)
+        started_at = self._event_start_ts
+        ended_at = self._event_last_det_ts
+        camera_location = self._event_camera_location
+
+        # Reset state SEBELUM enqueue agar event baru bisa dimulai segera
+        # setelah inter-cooldown.
+        self._event_active = False
+        self._event_id = ""
+        self._event_end_ts = now
+        self._event_peak_det = None
+        self._event_peak_frame = None
+        self._event_first_det = None
+        self._event_class_counts = {}
+        self._event_frame_count = 0
+        self._event_camera_location = ""
+
+        # Simpan snapshot peak ke path deterministik utk dashboard.
+        snapshot_path = self._save_event_snapshot(event_id, frame_to_send)
+
+        # Persist record event ke JSONL (untuk dashboard / evaluasi).
+        wa_will_send = self.event_send_summary and not (
+            level == "suspect" and not self.suspect_enabled
+        )
+        record = {
+            "event_id": event_id,
+            "started_at": round(started_at, 3),
+            "ended_at": round(ended_at, 3),
+            "duration_sec": round(duration, 3),
+            "level": level,
+            "peak_class": peak_det.get("class_name", "?"),
+            "peak_confidence": round(float(peak_det.get("confidence", 0.0)), 4),
+            "peak_bbox": peak_det.get("box") or peak_det.get("bbox"),
+            "frame_count": frame_count,
+            "class_breakdown": class_counts,
+            "snapshot_path": snapshot_path,
+            "camera_location": camera_location,
+            "wa_sent": wa_will_send,
+        }
+        self._persist_event_record(record)
+
+        if wa_will_send:
+            msg = self._build_event_summary_message(
+                level=level,
+                peak_det=peak_det,
+                duration=duration,
+                frame_count=frame_count,
+                class_counts=class_counts,
+                started_at=started_at,
+                ended_at=ended_at,
+                extra_text=extra_text,
+            )
+            self._enqueue_built_message(
+                msg, frame_to_send, snapshot_dir,
+                prefix=("suspect" if level == "suspect" else "alarm") + "_summary",
+                tag=f"{level}-summary",
+            )
+        else:
+            logger.info(
+                f"Event [{level}] selesai (dur={duration:.1f}s, "
+                f"frames={frame_count}) -- summary tidak dikirim."
+            )
+
+    # ---------- Helpers persistensi (JSONL + snapshot deterministik) -------
+    @staticmethod
+    def _extract_camera_location(extra_text: str) -> str:
+        """Ambil 'Lokasi : XYZ' dari extra_text (best-effort)."""
+        if not extra_text:
+            return ""
+        for line in extra_text.splitlines():
+            s = line.strip()
+            low = s.lower()
+            if low.startswith("lokasi"):
+                _, _, val = s.partition(":")
+                return val.strip()
+        return ""
+
+    def _save_event_snapshot(
+        self, event_id: str, frame: Optional[np.ndarray]
+    ) -> Optional[str]:
+        """Simpan peak frame ke path deterministik ``event_<id>.jpg``.
+
+        Path ini dirujuk oleh JSONL record sehingga dashboard tahu file
+        mana yang harus ditampilkan utk event tsb.
+        """
+        if frame is None:
+            return None
+        try:
+            self.event_snapshot_dir.mkdir(parents=True, exist_ok=True)
+            out_path = self.event_snapshot_dir / f"event_{event_id}.jpg"
+            f = frame
+            h, w = f.shape[:2]
+            if w > self.snapshot_max_width:
+                scale = self.snapshot_max_width / float(w)
+                f = cv2.resize(
+                    f, (self.snapshot_max_width, int(h * scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
+            ok, buf = cv2.imencode(
+                ".jpg", f,
+                [int(cv2.IMWRITE_JPEG_QUALITY), self.snapshot_jpeg_quality],
+            )
+            if not ok:
+                return None
+            out_path.write_bytes(buf.tobytes())
+            return str(out_path).replace("\\", "/")
+        except Exception as e:
+            logger.warning(f"Gagal simpan event snapshot: {e}")
+            return None
+
+    def _persist_event_record(self, record: dict) -> None:
+        """Append-only JSONL writer (1 baris JSON per event)."""
+        try:
+            self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(record, ensure_ascii=False)
+            with self._jsonl_lock:
+                with self.event_log_path.open("a", encoding="utf-8") as fp:
+                    fp.write(line + "\n")
+        except Exception as e:
+            logger.warning(f"Gagal tulis event ke JSONL: {e}")
+
+    def _enqueue_built_message(
+        self,
+        message: str,
+        frame: Optional[np.ndarray],
+        snapshot_dir: str | Path,
+        prefix: str,
+        tag: str,
+    ) -> bool:
+        """Enqueue pesan yang sudah jadi (dipakai event lifecycle)."""
+        if self._queue is None or self._worker is None or not self._worker.is_alive():
+            # Worker belum jalan -> kirim synchronous (mungkin blocking).
+            logger.warning(
+                f"Worker alarm belum start, fallback sync utk [{tag}]."
+            )
+            ok = self._send_with_image(message, frame, snapshot_dir, prefix)
+            if ok:
+                logger.info(f"Alarm WA [{tag}] terkirim ke {self.recipients}")
+            return ok
+        job = {
+            "message": message,
+            "frame": frame.copy() if frame is not None else None,
+            "snapshot_dir": snapshot_dir,
+            "prefix": prefix,
+            "tag": tag,
+        }
+        try:
+            self._queue.put_nowait(job)
+            logger.info(
+                f"Alarm WA [{tag}] queued (qsize={self._queue.qsize()})"
+            )
+            return True
+        except queue.Full:
+            logger.warning(f"Antrian alarm penuh, drop job [{tag}].")
+            return False
+
+    def flush_event(
+        self,
+        extra_text: str = "",
+        snapshot_dir: str | Path = "runs/alarm",
+    ) -> None:
+        """Tutup paksa event yang masih aktif (mis. saat shutdown)."""
+        with self._event_lock:
+            if self._event_active:
+                self._close_event_locked(time.time(), extra_text, snapshot_dir)
+
+    def _build_event_start_message(
+        self, detection: dict, level: str, extra_text: str
+    ) -> str:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        cls = detection.get("class_name", "?")
+        conf = float(detection.get("confidence", 0.0))
+        if level == "suspect":
+            header = "⚠️ *EVENT DICURIGAI MEROKOK DIMULAI*"
+            note = ("_Confidence di bawah ambang konfirmasi — "
+                    "mohon verifikasi visual._")
+        else:
+            header = "🚨 *EVENT DETEKSI MEROKOK DIMULAI*"
+            note = ""
+        msg = (
+            f"{header}\n"
+            f"Waktu  : {ts}\n"
+            f"Kelas  : {cls}\n"
+            f"Confidence: {conf:.2%}\n"
+        )
+        if extra_text:
+            msg += f"{extra_text}\n"
+        msg += (
+            f"\n_Ringkasan akan dikirim saat event selesai "
+            f"(idle > {self.event_gap_sec:.0f}s atau durasi > "
+            f"{self.event_max_dur_sec:.0f}s)._\n"
+        )
+        if note:
+            msg += f"\n{note}\n"
+        return msg
+
+    def _build_event_summary_message(
+        self,
+        level: str,
+        peak_det: dict,
+        duration: float,
+        frame_count: int,
+        class_counts: dict,
+        started_at: float,
+        ended_at: float,
+        extra_text: str,
+    ) -> str:
+        t_start = time.strftime("%H:%M:%S", time.localtime(started_at))
+        t_end = time.strftime("%H:%M:%S", time.localtime(ended_at))
+        peak_cls = peak_det.get("class_name", "?")
+        peak_conf = float(peak_det.get("confidence", 0.0))
+        if level == "suspect":
+            header = "⚠️ *RINGKASAN EVENT DICURIGAI MEROKOK*"
+        else:
+            header = "🚨 *RINGKASAN EVENT DETEKSI MEROKOK*"
+        # Format breakdown kelas: "merokok: 12, pegang rokok: 5"
+        if class_counts:
+            breakdown = ", ".join(
+                f"{k}: {v}" for k, v in sorted(
+                    class_counts.items(), key=lambda x: -x[1]
+                )
+            )
+        else:
+            breakdown = "-"
+        msg = (
+            f"{header}\n"
+            f"Mulai   : {t_start}\n"
+            f"Selesai : {t_end}\n"
+            f"Durasi  : {duration:.1f} detik\n"
+            f"Frame   : {frame_count}\n"
+            f"Peak    : {peak_cls} ({peak_conf:.2%})\n"
+            f"Kelas   : {breakdown}\n"
+        )
+        if extra_text:
+            msg += f"{extra_text}\n"
+        msg += "\n_Snapshot terlampir adalah frame dgn confidence tertinggi._\n"
+        return msg
+
     # ----------------------------------------------------------------- public
     def _build_message(
         self, detection: dict, level: str, extra_text: str
@@ -384,6 +797,17 @@ class WhatsAppAlarm:
     ) -> bool:
         """Kirim ke WAHA tanpa menyentuh cooldown. Aman dipanggil dari worker."""
         msg = self._build_message(detection, level, extra_text)
+        prefix = "suspect" if level == "suspect" else "alarm"
+        return self._send_with_image(msg, frame, snapshot_dir, prefix)
+
+    def _send_with_image(
+        self,
+        msg: str,
+        frame: Optional[np.ndarray],
+        snapshot_dir: str | Path,
+        prefix: str,
+    ) -> bool:
+        """Encode frame -> simpan snapshot -> kirim via WAHA. Fallback text."""
         if frame is None:
             return self.send_text(msg)
 
@@ -411,7 +835,6 @@ class WhatsAppAlarm:
         jpg_bytes = buf.tobytes()
 
         # Simpan snapshot utk audit (best effort, tidak fatal kalau gagal).
-        prefix = "suspect" if level == "suspect" else "alarm"
         filename = f"{prefix}_{int(time.time())}.jpg"
         try:
             snap_dir = Path(snapshot_dir)
@@ -492,6 +915,21 @@ class WhatsAppAlarm:
                 self._queue.task_done()
                 break
             try:
+                # --- Job event-based (pesan sudah dibuild di luar) ---
+                if "message" in job:
+                    ok = self._send_with_image(
+                        job["message"], job["frame"],
+                        job["snapshot_dir"], job.get("prefix", "event"),
+                    )
+                    tag = job.get("tag", "event")
+                    if ok:
+                        logger.info(
+                            f"Alarm WA [{tag}] terkirim ke {self.recipients}"
+                        )
+                    else:
+                        logger.error(f"Alarm WA [{tag}] GAGAL dikirim.")
+                    continue
+                # --- Job legacy (per-detection + cooldown) ---
                 conf = float(job["detection"].get("confidence", 0.0))
                 level = job["level"]
                 ok = self._do_send(
@@ -574,7 +1012,14 @@ class WhatsAppAlarm:
             return False
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Hentikan worker dengan rapi (flush antrian)."""
+        """Hentikan worker dengan rapi (flush event aktif + flush antrian)."""
+        # Jika ada event yang masih aktif, paksa tutup dulu supaya
+        # ringkasannya tetap terkirim sebelum proses berakhir.
+        try:
+            self.flush_event()
+        except Exception as e:
+            logger.warning(f"flush_event() gagal saat stop: {e}")
+
         if self._worker is None:
             return
         self._worker_stop.set()

@@ -7,17 +7,26 @@ Kelas yang dideteksi: `merokok`, `pegang rokok` (sesuai `data.yaml`).
 ## Arsitektur ringkas
 
 ```
-┌─────────────┐  Wi-Fi/HTTP   ┌──────────────┐   alarm     ┌─────────┐
+┌─────────────┐  Wi-Fi/HTTP   ┌──────────────┐   event     ┌─────────┐
 │ Kamera HP   │ ─────────────▶│ PC + YOLOv12 │────────────▶│  WAHA   │
-│ (IP Webcam) │   MJPEG       │  (video.py)  │  HTTP POST  │ (Docker)│
-└─────────────┘               └──────────────┘             └────┬────┘
-                                                                │ WhatsApp
-                                                                ▼
-                                                       ┌──────────────────┐
-                                                       │ Nomor penerima   │
-                                                       │ (WA_RECIPIENT)   │
-                                                       └──────────────────┘
+│ (IP Webcam) │   MJPEG       │  (video.py)  │  HTTP POST  │ /wa-bot │
+└─────────────┘               └──────┬───────┘             └────┬────┘
+                                     │ JSONL                    │ WhatsApp
+                                     ▼                          ▼
+                              runs/events.jsonl        ┌──────────────────┐
+                                     │                 │ Nomor penerima   │
+                                     ▼                 │ (WA_RECIPIENT)   │
+                              ┌──────────────┐         └──────────────────┘
+                              │ dashboard.py │  ← evaluasi & labeling
+                              │  (Streamlit) │
+                              └──────────────┘
 ```
+
+> **Event-based debouncing:** sistem mengelompokkan deteksi berurutan
+> menjadi **satu event**. Tiap event hanya menghasilkan **2 pesan WA**
+> (start + summary) — bukan 1 pesan per frame. Detail tiap event
+> (timestamp, durasi, peak confidence, snapshot) disimpan ke
+> `runs/events.jsonl` untuk dianalisis di dashboard.
 
 ## Struktur file
 
@@ -27,7 +36,9 @@ Kelas yang dideteksi: `merokok`, `pegang rokok` (sesuai `data.yaml`).
 | `predict.py`   | Inferensi gambar (file / folder) |
 | `video.py`     | Deteksi realtime video / webcam / IP Webcam + alarm WA |
 | `api.py`       | FastAPI service untuk upload gambar |
-| `alarm.py`     | Client WAHA + cooldown anti-spam + snapshot bukti |
+| `alarm.py`     | Client WAHA + **event-based debouncing** + JSONL logger |
+| `dashboard.py` | Dashboard Streamlit (analitik event + labeling false-positive) |
+| `wa-bot/`      | Bridge Node.js (whatsapp-web.js) — alternatif WAHA tanpa Docker |
 | `utils.py`     | Helper (logger, drawing, JSON formatter) |
 | `data.yaml`    | Konfigurasi dataset |
 | `.env.example` | Template konfigurasi (salin ke `.env`) |
@@ -39,7 +50,86 @@ pip install -r requirements.txt
 ```
 
 > Catatan: weights `yolov12n.pt` akan otomatis diunduh oleh ultralytics
-> saat pertama kali training.
+> saat pertama kali training. Untuk dashboard, paket `streamlit` & `pandas`
+> sudah ada di `requirements.txt`. Bridge WA Node.js (`wa-bot/`) butuh
+> Node.js LTS \u2265 18.
+
+---
+
+## \ud83d\ude80 Quick Start \u2014 Menjalankan Sistem End-to-End
+
+Sistem terdiri dari **3 komponen** yang dijalankan paralel di terminal
+berbeda. Asumsinya `.env` sudah diisi dan model `best.pt` sudah ada
+(hasil training, atau pakai `yolov12n.pt` untuk uji cepat).
+
+### Terminal 1 \u2014 Bot WhatsApp (WAHA / wa-bot)
+
+Pilih **salah satu**:
+
+**A. Bridge Node.js (direkomendasikan, tanpa Docker)**
+```bash
+cd wa-bot
+npm install        # sekali saja
+npm start
+```
+Buka `http://localhost:3000` \u2192 scan QR pakai HP **pengirim** alarm
+(WhatsApp \u2192 Setelan \u2192 Perangkat Tertaut \u2192 Tautkan Perangkat).
+Tunggu status berubah menjadi **WORKING**.
+
+**B. WAHA via Docker**
+```bash
+docker run -it --rm -p 3000:3000 devlikeapro/waha
+```
+Buka `http://localhost:3000` \u2192 session `default` \u2192 Start \u2192 scan QR \u2192
+tunggu status `WORKING`.
+
+> Sesi tersimpan di `wa-bot/.wwebjs_auth/` (Opsi A) atau volume Docker
+> (Opsi B). Cukup scan QR sekali.
+
+### Terminal 2 \u2014 Deteksi Realtime (HP IP Webcam)
+
+1. Pastikan **HP dan PC satu Wi-Fi** (lihat detail di bagian
+   [Setup kamera HP](#setup-kamera-hp-tanpa-kabel-usb) di bawah).
+2. Jalankan app **IP Webcam** di HP \u2192 tekan **Start server** \u2192 catat URL
+   (mis. `http://192.168.1.10:8080`).
+3. Set di `.env`:
+   ```env
+   VIDEO_SOURCE=http://192.168.1.10:8080/video
+   MODEL_PATH=runs/train/rokok_yolov12/weights/best.pt
+   WAHA_URL=http://localhost:3000
+   WA_RECIPIENT=628xxxxxxxxxx
+   CAMERA_LOCATION=Lab AI Lantai 2
+   ```
+4. Jalankan deteksi:
+   ```bash
+   python video.py
+   ```
+   Atau override sementara:
+   ```bash
+   python video.py --source http://192.168.1.10:8080/video
+   ```
+
+Saat YOLO mendeteksi `merokok` / `pegang rokok`:
+- Sistem membuka **event**, kirim pesan WA **"EVENT DIMULAI"**.
+- Setelah deteksi berhenti (gap > `ALERT_EVENT_GAP_SEC` detik), event
+  ditutup \u2192 kirim **"RINGKASAN EVENT"** (durasi, peak confidence,
+  jumlah frame, snapshot terbaik).
+- Event direkam ke `runs/events.jsonl` + snapshot ke
+  `runs/alarm/event_<id>.jpg`.
+
+Tekan `q` di jendela video untuk berhenti.
+
+### Terminal 3 \u2014 Dashboard
+
+```bash
+streamlit run dashboard.py
+```
+
+Browser otomatis terbuka di `http://localhost:8501`. Dashboard akan
+mem-polling `runs/events.jsonl` setiap 5 detik. Lihat detail fitur di
+bagian [Dashboard](#dashboard).
+
+---
 
 ## Training
 
@@ -238,6 +328,23 @@ Variabel utama:
 | `VIDEO_SOURCE`         | URL IP Webcam HP / `0` webcam laptop / path video |
 | `MODEL_PATH`           | Path ke `best.pt` hasil training |
 
+**Variabel event-debouncing (anti-spam pintar):**
+
+| Variabel | Default | Keterangan |
+|---|---|---|
+| `ALERT_EVENT_GAP_SEC`            | `15`  | Gap tanpa deteksi (detik) sebelum event ditutup |
+| `ALERT_EVENT_MAX_DUR_SEC`        | `120` | Durasi maks satu event (force-close agar tidak nempel selamanya) |
+| `ALERT_EVENT_INTER_COOLDOWN_SEC` | `30`  | Jeda minimum antar event (cegah event langsung disambung) |
+| `ALERT_EVENT_SEND_SUMMARY`       | `true`| Kirim pesan summary saat event ditutup |
+
+**Variabel persistensi (dipakai dashboard):**
+
+| Variabel | Default | Keterangan |
+|---|---|---|
+| `EVENT_LOG_PATH`     | `runs/events.jsonl` | File JSONL berisi 1 baris per event selesai |
+| `EVENT_SNAPSHOT_DIR` | `runs/alarm`        | Folder snapshot peak frame (`event_<id>.jpg`) |
+| `LABEL_LOG_PATH`     | `runs/labels.jsonl` | File label false-positive (ditulis dashboard) |
+
 ### 3. Jalankan
 
 ```bash
@@ -247,19 +354,30 @@ python video.py
 Ketika YOLO mendeteksi kelas yang termasuk `ALERT_CLASSES` dengan
 confidence di atas `ALERT_CONF_THRESHOLD`, sistem akan:
 
-1. Menyimpan snapshot bukti ke `runs/alarm/alarm_<timestamp>.jpg`.
-2. Mengirim **gambar + caption** ke setiap nomor `WA_RECIPIENT`
-   melalui WAHA (`POST /api/sendImage`).
-3. Menerapkan cooldown `ALERT_COOLDOWN_SEC` agar tidak spam.
+1. **Membuka event** dan mengirim pesan **"EVENT DIMULAI"** ke WA.
+2. Setiap frame deteksi selanjutnya hanya memperbarui state event
+   (peak confidence, jumlah frame, breakdown kelas) — **tidak** kirim WA.
+3. Bila tidak ada deteksi selama `ALERT_EVENT_GAP_SEC` detik, event
+   ditutup. Sistem mengirim **"RINGKASAN EVENT"** berisi durasi, peak
+   confidence, jumlah frame, dan **snapshot terbaik** ke WA.
+4. Record event ditulis ke `runs/events.jsonl`; snapshot ke
+   `runs/alarm/event_<id>.jpg` — keduanya dipakai dashboard.
+5. Event berikutnya baru bisa dimulai setelah
+   `ALERT_EVENT_INTER_COOLDOWN_SEC` detik.
 
-Contoh pesan yang diterima:
+Hasilnya: kalau seseorang merokok selama 30 detik, kamu cukup menerima
+**2 pesan** (start + summary) — bukan puluhan notifikasi per frame.
+
+Contoh pesan summary yang diterima:
 
 ```
-🚨 ALARM DETEKSI MEROKOK
-Waktu  : 2026-05-19 14:23:11
-Kelas  : merokok
-Confidence: 87.45%
-Lokasi : Kamera HP - Ruang Utama
+🚨 RINGKASAN EVENT MEROKOK
+Mulai     : 2026-05-19 14:23:11
+Selesai   : 2026-05-19 14:23:41
+Durasi    : 30.2 detik
+Frame     : 24
+Peak      : merokok (87.45%)
+Lokasi    : Lab AI Lantai 2
 ```
 
 ### Troubleshooting
@@ -271,6 +389,61 @@ Lokasi : Kamera HP - Ruang Utama
 | `Gagal membuka source video` | HP & PC harus satu Wi-Fi, IP/URL benar, IP Webcam jalan |
 | Alarm tidak terkirim | Cek `WA_RECIPIENT` & status session = `WORKING` |
 | FPS lambat saat pakai IP Webcam | Turunkan resolusi di app IP Webcam ke 640x480 |
+
+## Dashboard
+
+Dashboard Streamlit untuk **monitoring + evaluasi** event deteksi.
+
+### Jalankan
+
+```bash
+streamlit run dashboard.py
+```
+
+Buka `http://localhost:8501`. Dashboard otomatis membaca:
+- `runs/events.jsonl` \u2014 daftar event (ditulis `alarm.py`)
+- `runs/alarm/event_<id>.jpg` \u2014 snapshot tiap event
+- `runs/labels.jsonl` \u2014 label false-positive (ditulis dashboard)
+
+> Jika file `runs/events.jsonl` belum ada, dashboard akan menampilkan
+> pesan info \u2014 jalankan dulu `python video.py` sampai ada event tercatat.
+
+### Fitur
+
+- **Filter** (sidebar): rentang tanggal, level (confirm/suspect),
+  kelas peak, status label.
+- **Metrik ringkas:** total event, confirm vs suspect, durasi
+  rata-rata, jumlah false-positive.
+- **\ud83d\udcc9 Reduksi notifikasi WhatsApp:** menghitung **berapa persen**
+  notifikasi berhasil ditekan sistem dibanding skenario 1-pesan-per-frame
+  (kontribusi utama yang bisa dilaporkan di skripsi).
+- **Grafik:** event per jam, distribusi kelas peak, distribusi peak
+  confidence, distribusi durasi event.
+- **Daftar event** (expandable) dengan **thumbnail snapshot**, detail
+  lengkap, dan tombol label:
+  - \u274c **False Positive** \u2014 tandai event sebagai salah deteksi
+  - \u2705 **True Positive** \u2014 konfirmasi deteksi benar
+  - \u21ba **Reset label**
+- **Ekspor CSV** event yang difilter (untuk analisis di Excel/notebook
+  skripsi).
+
+### Konfigurasi (opsional)
+
+Override path file via env var (sama dengan `alarm.py`):
+
+```env
+EVENT_LOG_PATH=runs/events.jsonl
+EVENT_SNAPSHOT_DIR=runs/alarm
+LABEL_LOG_PATH=runs/labels.jsonl
+```
+
+### Catatan
+
+- Format JSONL **append-only** \u2014 aman dijalankan paralel dengan
+  `video.py`. Dashboard pakai cache TTL 5 detik (klik **Muat ulang data**
+  di sidebar untuk refresh manual).
+- Label tersimpan terpisah di `runs/labels.jsonl` (record terakhir per
+  `event_id` menang) supaya `events.jsonl` tetap immutable.
 
 ## API (FastAPI)
 

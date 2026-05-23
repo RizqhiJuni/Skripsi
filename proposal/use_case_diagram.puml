@@ -1,0 +1,87 @@
+@startuml
+title Use Case Diagram - Sistem Deteksi Aktivitas Merokok\n(YOLOv12 + Alarm WhatsApp)
+
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+
+' ===================== Aktor =====================
+actor "Admin / Peneliti"             as Admin
+actor "Tersangka Perokok"            as Perokok
+actor "Penerima Alarm"               as Penerima
+
+actor "Kamera\n(Webcam / IP Webcam)" as Kamera
+actor "Model YOLOv12"                as Model
+actor "WAHA\n(WhatsApp HTTP API)"    as WAHA
+
+' ===================== Use Case =====================
+rectangle "Sistem Deteksi Aktivitas Merokok" {
+
+  usecase "Menyiapkan Dataset"                  as UC_Dataset
+  usecase "Melatih Model YOLOv12"               as UC_Train
+  usecase "Memvalidasi / Menguji Model"         as UC_Val
+
+  usecase "Memprediksi Gambar\n(predict.py)"    as UC_PredictImg
+  usecase "Mengakses API Deteksi\n(FastAPI)"    as UC_API
+  usecase "Upload Gambar via API"               as UC_Upload
+  usecase "Melihat Hasil Visual (bbox)"         as UC_Visual
+  usecase "Menyimpan Hasil JSON"                as UC_SaveJson
+
+  usecase "Menjalankan Deteksi Realtime\n(video.py)" as UC_Realtime
+  usecase "Konfigurasi Sumber Kamera"           as UC_ConfigCam
+  usecase "Mengambil Frame Video"               as UC_GrabFrame
+  usecase "Melakukan Aktivitas Merokok\n(di depan kamera)" as UC_DoSmoke
+  usecase "Mendeteksi Aktivitas Merokok"        as UC_Detect
+  usecase "Menampilkan Bounding Box"            as UC_ShowBox
+
+  usecase "Memfilter Confidence & Kelas Target" as UC_Filter
+  usecase "Mengirim Alarm WhatsApp"             as UC_Alarm
+  usecase "Menerapkan Cooldown (anti-spam)"     as UC_Cooldown
+  usecase "Menyimpan Snapshot Bukti"            as UC_Snapshot
+  usecase "Menerima Notifikasi WhatsApp"        as UC_Notif
+}
+
+' ===================== Relasi Aktor Primer =====================
+Admin    --> UC_Dataset
+Admin    --> UC_Train
+Admin    --> UC_Val
+Admin    --> UC_PredictImg
+Admin    --> UC_Upload
+Admin    --> UC_API
+Admin    --> UC_Realtime
+Admin    --> UC_ConfigCam
+
+Perokok  --> UC_DoSmoke
+
+Penerima --> UC_Notif
+
+' ===================== Relasi Aktor Sekunder =====================
+UC_DoSmoke    --> Kamera
+UC_GrabFrame  --> Kamera
+UC_PredictImg --> Model
+UC_API        --> Model
+UC_Detect     --> Model
+UC_Alarm      --> WAHA
+WAHA          --> UC_Notif
+
+' ===================== Include / Extend =====================
+UC_Train      ..> UC_Dataset  : <<include>>
+UC_Val        ..> UC_Train    : <<include>>
+
+UC_PredictImg ..> UC_SaveJson : <<include>>
+UC_PredictImg ..> UC_Visual   : <<extend>>
+UC_Upload     ..> UC_API      : <<extend>>
+UC_API        ..> UC_Visual   : <<extend>>
+UC_API        ..> UC_SaveJson : <<extend>>
+
+UC_Realtime   ..> UC_ConfigCam : <<include>>
+UC_Realtime   ..> UC_GrabFrame : <<include>>
+UC_Realtime   ..> UC_Detect    : <<include>>
+UC_Realtime   ..> UC_ShowBox   : <<include>>
+
+UC_Detect     ..> UC_Filter   : <<include>>
+UC_Detect     ..> UC_Alarm    : <<extend>>
+UC_Alarm      ..> UC_Cooldown : <<include>>
+UC_Alarm      ..> UC_Snapshot : <<include>>
+
+@enduml
